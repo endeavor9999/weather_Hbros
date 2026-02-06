@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>실시간 날씨 상황판</title>
+    
+    <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css" />
+    
+    <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+
+    <style>
+        /* [전역 스타일] */
+        body {
+            font-family: 'Pretendard', sans-serif;
+            background-color: #f1f5f9; /* 연한 회색 배경 */
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        /* [상단 헤더] */
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+            color: #1e293b;
+        }
+        .header h1 { margin: 0; font-size: 1.5rem; font-weight: 800; }
+        .header p { margin: 5px 0 0; font-size: 0.9rem; color: #64748b; }
+
+        /* [그리드 레이아웃 - 핵심!] */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr; /* PC: 가로 2개 */
+            gap: 15px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        /* [모바일 대응: 화면 600px 이하일 때] */
+        @media (max-width: 600px) {
+            .dashboard-grid {
+                grid-template-columns: 1fr; /* 폰: 가로 1개 (세로 정렬) */
+            }
+        }
+
+        /* [날씨 카드 디자인] */
+        .card {
+            background: white;
+            border-radius: 20px;
+            padding: 25px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+            transition: transform 0.2s ease;
+        }
+        
+        .card:active { transform: scale(0.98); } /* 눌렀을 때 살짝 작아짐 */
+
+        /* 텍스트 영역 */
+        .card-info h2 { margin: 0; font-size: 1.1rem; color: #64748b; font-weight: 600; }
+        .card-info .temp { font-size: 2.2rem; font-weight: 800; color: #334155; margin-top: 5px; display: block; }
+        
+        /* 아이콘 영역 */
+        .card-icon { font-size: 3rem; }
+
+        /* [비상 상태 (Alert) 스타일] */
+        .card.alert {
+            background-color: #fee2e2; /* 연한 빨강 배경 */
+            border: 2px solid #ef4444; /* 진한 빨강 테두리 */
+            animation: pulse 1s infinite; /* 깜빡임 애니메이션 */
+        }
+        .card.alert .card-info h2 { color: #b91c1c; }
+        .card.alert .temp { color: #991b1b; }
+
+        /* 깜빡임 애니메이션 정의 */
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+            70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+
+        /* [연결 상태 표시] */
+        #connection-status {
+            text-align: center; margin-top: 20px; font-size: 0.8rem; color: #94a3b8;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>Dashboard</h1>
+        <p>전국 실시간 날씨 모니터링</p>
+    </div>
+
+    <div class="dashboard-grid">
+        <div id="card-SEOUL" class="card">
+            <div class="card-info">
+                <h2>SEOUL (본사)</h2>
+                <span id="temp-SEOUL" class="temp">-</span>
+            </div>
+            <div class="card-icon" id="icon-SEOUL">☀️</div>
+        </div>
+
+        <div id="card-BUSAN" class="card">
+            <div class="card-info">
+                <h2>BUSAN (2공장)</h2>
+                <span id="temp-BUSAN" class="temp">-</span>
+            </div>
+            <div class="card-icon" id="icon-BUSAN">🌊</div>
+        </div>
+
+        <div id="card-DAEGU" class="card">
+            <div class="card-info">
+                <h2>DAEGU (물류)</h2>
+                <span class="temp">준비중</span>
+            </div>
+            <div class="card-icon">☁️</div>
+        </div>
+
+        <div id="card-GWANGJU" class="card">
+            <div class="card-info">
+                <h2>GWANGJU (자재)</h2>
+                <span class="temp">준비중</span>
+            </div>
+            <div class="card-icon">🌧️</div>
+        </div>
+    </div>
+
+    <div id="connection-status">🔴 서버 연결 시도중...</div>
+
+    <script>
+        var stompClient = null;
+
+        function connect() {
+            // 1. 서버의 /ws 엔드포인트에 연결
+            var socket = new SockJS('/ws');
+            stompClient = Stomp.over(socket);
+            
+            // 디버그 로그 끄기 (콘솔 깔끔하게)
+            stompClient.debug = null; 
+
+            stompClient.connect({}, function (frame) {
+                console.log('Connected: ' + frame);
+                document.getElementById('connection-status').innerText = '🟢 실시간 데이터 수신중';
+                
+                // 2. /topic/weather 주소 구독 (데이터 오면 updateView 실행)
+                stompClient.subscribe('/topic/weather', function (message) {
+                    var data = JSON.parse(message.body);
+                    updateView(data);
+                });
+            }, function(error) {
+                console.log("Connection Error: " + error);
+                document.getElementById('connection-status').innerText = '🔴 서버 연결 끊김 (재접속 중...)';
+                setTimeout(connect, 3000); // 3초 뒤 재연결 시도
+            });
+        }
+
+        function updateView(data) {
+            // [서울 업데이트]
+            if (data.SEOUL) {
+                document.getElementById('temp-SEOUL').innerText = data.SEOUL + "°C";
+            }
+
+            // [부산 업데이트] - 특수 로직: 비(RAIN) 오면 빨간색 경고!
+            if (data.BUSAN) {
+                var busanCard = document.getElementById('card-BUSAN');
+                var busanIcon = document.getElementById('icon-BUSAN');
+                var busanTemp = document.getElementById('temp-BUSAN');
+
+                busanTemp.innerText = data.BUSAN + "°C";
+
+                // 상태값 확인 (백엔드에서 BUSAN_STATUS를 보내줘야 함)
+                if (data.BUSAN_STATUS === 'RAIN') {
+                    busanCard.classList.add('alert'); // 빨간색+깜빡임 클래스 추가
+                    busanIcon.innerText = '⛈️'; // 아이콘 변경
+                    busanTemp.innerText = data.BUSAN + "°C (호우)";
+                } else {
+                    busanCard.classList.remove('alert'); // 정상 복구
+                    busanIcon.innerText = '☀️';
+                }
+            }
+        }
+
+        // 앱 시작 시 연결
+        connect();
+    </script>
+</body>
+</html>
